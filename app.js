@@ -10,7 +10,8 @@
   const $ = id => document.getElementById(id);
   const audio = $('audio'), referenceAudio = $('reference-audio');
   let kind='utterance',language='all',emotionFilter='all',sample=examples[0];
-  let generation=0,pendingSeek=null,currentTurn=-1;
+  let generation=0,pendingSeek=null,currentTurn=-1,referenceGeneration=0;
+  let audioReady=false,currentReference=null;
   const time=s=>`${Math.floor((s||0)/60)}:${String(Math.floor((s||0)%60)).padStart(2,'0')}`;
   function el(tag,cls,text){const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=text;return n;}
   function tag(label){const n=el('span','emotion-tag');n.style.setProperty('--mood',moods[label].color);n.append(el('i'),document.createTextNode(moods[label].name));return n;}
@@ -71,13 +72,43 @@
     $('reference-select-label').hidden=refs.length<2;
     $('reference-select').replaceChildren(...refs.map((ref,i)=>{const option=el('option','',ref.speaker);option.value=i;return option;}));
     setReference(refs[0]);
-    audio.src=sample.audio.src;audio.load();
+    loadGeneratedAudio();
     $('waveform').replaceChildren(...sample.audio.waveform.map(v=>{const bar=el('i');bar.style.height=`${Math.max(4,v*46)}px`;return bar;}));
     $('seek').value=0;$('current-time').textContent='0:00';$('total-time').textContent=time(sample.audio.duration);
-    $('player-status').textContent=full?'Press play to hear the complete dialogue.':'Press play to hear this script excerpt.';
+    $('player-status').textContent='Loading audio…';
     updatePlayback();
   }
-  function setReference(ref){referenceAudio.pause();referenceAudio.src=ref.src;referenceAudio.load();$('reference-speaker').textContent=`· ${ref.speaker}`;$('reference-status').textContent='';}
+  function setReference(ref){
+    currentReference=ref;const version=++referenceGeneration;
+    referenceAudio.pause();referenceAudio.removeAttribute('src');referenceAudio.load();referenceAudio.controls=false;
+    $('reference-speaker').textContent=`· ${ref.speaker}`;
+    $('reference-status').textContent='Loading reference audio…';$('reference-retry').hidden=true;
+    window.DBU_EMBEDDED_AUDIO.load(ref.src).then(url=>{
+      if(version!==referenceGeneration)return;
+      referenceAudio.src=url;referenceAudio.dataset.source=ref.src;referenceAudio.load();referenceAudio.controls=true;
+      $('reference-status').textContent='';
+    }).catch(()=>{if(version!==referenceGeneration)return;$('reference-status').textContent='Reference audio could not be loaded.';$('reference-retry').hidden=false;});
+  }
+  function loadGeneratedAudio(){
+    const version=generation;audioReady=false;
+    audio.pause();audio.removeAttribute('src');audio.load();
+    $('play').disabled=true;$('restart').disabled=true;$('seek').disabled=true;
+    document.querySelectorAll('.dialogue-turn').forEach(b=>b.disabled=true);
+    $('player-box').setAttribute('aria-busy','true');$('player-status').textContent='Loading audio…';
+    window.DBU_EMBEDDED_AUDIO.load(sample.audio.src).then(url=>{
+      if(version!==generation)return;
+      audio.src=url;audio.dataset.source=sample.audio.src;audio.load();audioReady=true;
+      $('play').disabled=false;$('restart').disabled=false;$('seek').disabled=false;
+      document.querySelectorAll('.dialogue-turn').forEach(b=>b.disabled=false);
+      $('player-box').setAttribute('aria-busy','false');updatePlayback();
+      $('player-status').textContent=sample.kind==='dialogue'?'Press play to hear the complete dialogue.':'Press play to hear this script excerpt.';
+    }).catch(()=>{
+      if(version!==generation)return;
+      $('player-box').setAttribute('aria-busy','false');$('play').disabled=false;
+      $('play').setAttribute('aria-label','Retry audio loading');$('play-symbol').textContent='↻';
+      $('player-status').textContent='Audio could not be loaded. Press retry.';
+    });
+  }
   function setMood(label,speaker){$('playing-label').textContent=moods[label].name;$('playing-note').textContent=speaker;$('player-box').style.setProperty('--mood',moods[label].color);$('mood-dot').style.backgroundColor=moods[label].color;}
   function updateTurn(seconds){
     if(sample.kind!=='dialogue')return;
@@ -94,7 +125,7 @@
     if(audio.readyState>0&&Number.isFinite(audio.duration))audio.currentTime=Math.min(seconds,audio.duration);
     else{pendingSeek=seconds;audio.load();}updateTurn(seconds);
   }
-  async function playAudio(){const version=generation;referenceAudio.pause();$('player-status').textContent='Loading audio…';
+  async function playAudio(){if(!audioReady){loadGeneratedAudio();return;}const version=generation;referenceAudio.pause();$('player-status').textContent='Loading audio…';
     try{await audio.play();}catch(error){if(version!==generation||error.name==='AbortError')return;$('player-status').textContent='Playback could not start. Press play to try again.';updatePlayback();}
   }
   function updatePlayback(){$('play-symbol').textContent=audio.paused?'▶':'Ⅱ';$('play').setAttribute('aria-label',audio.paused?'Play audio':'Pause audio');$('play').setAttribute('aria-pressed',String(!audio.paused));}
@@ -106,17 +137,18 @@
   $('play').addEventListener('click',()=>{if(audio.paused)playAudio();else{audio.pause();$('player-status').textContent='Paused. Press play to continue.';}});
   $('restart').addEventListener('click',()=>{seekTo(0);playAudio();});
   $('seek').addEventListener('input',()=>seekTo(Number($('seek').value)/1000*(Number.isFinite(audio.duration)?audio.duration:sample.audio.duration)));
+  $('reference-retry').addEventListener('click',()=>setReference(currentReference));
   $('reference-select').addEventListener('change',()=>setReference(sample.references[Number($('reference-select').value)]));
   audio.addEventListener('playing',()=>{if(audio.paused||audio.ended)return;referenceAudio.pause();updatePlayback();$('player-status').textContent=sample.kind==='dialogue'?'Playing the complete dialogue.':'Playing the script excerpt.';});
   audio.addEventListener('pause',updatePlayback);audio.addEventListener('timeupdate',updateProgress);
   audio.addEventListener('loadedmetadata',()=>{if(pendingSeek!==null){audio.currentTime=Math.min(pendingSeek,audio.duration);pendingSeek=null;}updateProgress();});
   audio.addEventListener('ended',()=>{updatePlayback();$('player-status').textContent=sample.kind==='dialogue'?'Full dialogue playback complete.':'Excerpt playback complete.';});
   audio.addEventListener('waiting',()=>{if(!audio.paused)$('player-status').textContent='Buffering audio…';});
-  audio.addEventListener('error',()=>{$('player-status').textContent='Audio could not be loaded. Select another example and try again.';updatePlayback();});
+  audio.addEventListener('error',()=>{if(!audioReady||!audio.error)return;$('player-status').textContent='Audio could not be loaded. Select another example and try again.';updatePlayback();});
   referenceAudio.addEventListener('playing',()=>{if(referenceAudio.paused||referenceAudio.ended)return;audio.pause();$('reference-status').textContent='Playing the original reference voice.';$('player-status').textContent='Generated audio paused while the reference plays.';});
-  referenceAudio.addEventListener('pause',()=>{$('reference-status').textContent='';});
+  referenceAudio.addEventListener('pause',()=>{if(referenceAudio.getAttribute('src'))$('reference-status').textContent='';});
   referenceAudio.addEventListener('ended',()=>{$('reference-status').textContent='Reference playback complete.';});
-  referenceAudio.addEventListener('error',()=>{$('reference-status').textContent='Reference audio could not be loaded. Please select another speaker.';});
+  referenceAudio.addEventListener('error',()=>{if(!referenceAudio.getAttribute('src')||!referenceAudio.error)return;$('reference-retry').hidden=false;$('reference-status').textContent='Reference audio could not be loaded. Please select another speaker.';});
   document.querySelectorAll('[data-lang]').forEach(button=>button.addEventListener('click',()=>{language=button.dataset.lang;document.querySelectorAll('[data-lang]').forEach(b=>b.setAttribute('aria-pressed',String(b===button)));applyFilter();}));
   document.querySelectorAll('[data-kind]').forEach(button=>button.addEventListener('click',()=>{kind=button.dataset.kind;document.querySelectorAll('[data-kind]').forEach(b=>b.setAttribute('aria-pressed',String(b===button)));applyFilter();}));
   $('emotion-filter').addEventListener('change',()=>{emotionFilter=$('emotion-filter').value;applyFilter();});
